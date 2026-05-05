@@ -46,6 +46,35 @@ function LabeledInput({
   );
 }
 
+function LabeledSelect({
+  label,
+  value,
+  onChange,
+  options,
+}: {
+  label: string;
+  value: string;
+  onChange: (value: string) => void;
+  options: Array<{ label: string; value: string }>;
+}) {
+  return (
+    <label className="grid grid-cols-[70px_1fr] items-center gap-2 text-xs">
+      <span className="text-slate-600 font-medium">{label}</span>
+      <select
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+        className="h-8 rounded-md border border-slate-300 bg-white px-2 text-xs outline-none focus:border-sky-400"
+      >
+        {options.map((option) => (
+          <option key={option.value} value={option.value}>
+            {option.label}
+          </option>
+        ))}
+      </select>
+    </label>
+  );
+}
+
 export function ElementPropertiesPanel({
   element,
   onUpdateStyle,
@@ -214,6 +243,14 @@ export function ElementPropertiesPanel({
           <p className="text-xs font-semibold uppercase tracking-wider text-slate-500">
             Bordures et remplissage
           </p>
+          <label className="block text-xs text-slate-600 font-medium">
+            Texte de la forme
+            <textarea
+              value={element.label}
+              onChange={(event) => onUpdateText(event.target.value)}
+              className="mt-1 min-h-18 w-full rounded-md border border-slate-300 bg-white px-2 py-1.5 text-xs outline-none focus:border-sky-400"
+            />
+          </label>
           <LabeledInput
             label="Fond"
             type="color"
@@ -245,6 +282,43 @@ export function ElementPropertiesPanel({
             onChange={(v) =>
               onUpdateStyle({ cornerRadius: toNumber(v, element.cornerRadius) })
             }
+          />
+          <LabeledInput
+            label="Texte"
+            type="color"
+            value={element.textColor}
+            onChange={(v) => onUpdateStyle({ textColor: v })}
+          />
+          <LabeledInput
+            label="Taille"
+            type="number"
+            min={8}
+            max={220}
+            value={element.fontSize}
+            onChange={(v) =>
+              onUpdateStyle({ fontSize: toNumber(v, element.fontSize) })
+            }
+          />
+          <LabeledInput
+            label="Poids"
+            type="number"
+            min={100}
+            max={900}
+            step={100}
+            value={element.fontWeight}
+            onChange={(v) =>
+              onUpdateStyle({ fontWeight: toNumber(v, element.fontWeight) })
+            }
+          />
+          <LabeledSelect
+            label="Align"
+            value={element.textAlign}
+            onChange={(value) => onUpdateStyle({ textAlign: value })}
+            options={[
+              { label: "Gauche", value: "left" },
+              { label: "Centre", value: "center" },
+              { label: "Droite", value: "right" },
+            ]}
           />
         </div>
       )}
@@ -279,6 +353,15 @@ export function ElementPropertiesPanel({
             onChange={(v) =>
               onUpdateStyle({ borderRadius: toNumber(v, element.borderRadius) })
             }
+          />
+          <LabeledSelect
+            label="Mode"
+            value={element.fit}
+            onChange={(value) => onUpdateStyle({ fit: value })}
+            options={[
+              { label: "Cover", value: "cover" },
+              { label: "Contain", value: "contain" },
+            ]}
           />
         </div>
       )}
@@ -315,6 +398,232 @@ export function ElementPropertiesPanel({
             type="color"
             value={element.headerFill}
             onChange={(v) => onUpdateStyle({ headerFill: v })}
+          />
+          <label className="block text-xs text-slate-600 font-medium">
+            Entetes (separes par |)
+            <input
+              type="text"
+              value={element.headers.join(" | ")}
+              onChange={(event) =>
+                onUpdateStyle({
+                  headers: event.target.value
+                    .split("|")
+                    .map((item) => item.trim())
+                    .filter(Boolean),
+                })
+              }
+              className="mt-1 h-8 w-full rounded-md border border-slate-300 bg-white px-2 text-xs outline-none focus:border-sky-400"
+            />
+          </label>
+          <label className="block text-xs text-slate-600 font-medium">
+            Lignes (une ligne par ligne, cellules separees par |)
+            <textarea
+              value={element.rows.map((row) => row.join(" | ")).join("\n")}
+              onChange={(event) =>
+                onUpdateStyle({
+                  rows: event.target.value
+                    .split("\n")
+                    .map((line) => line.trim())
+                    .filter(Boolean)
+                    .map((line) => line.split("|").map((cell) => cell.trim())),
+                })
+              }
+              className="mt-1 min-h-24 w-full rounded-md border border-slate-300 bg-white px-2 py-1.5 text-xs outline-none focus:border-sky-400"
+            />
+          </label>
+        </div>
+      )}
+
+      {element.type === "icon" && (
+        <div className="rounded-xl border border-slate-200 bg-white p-3 space-y-2">
+          <p className="text-xs font-semibold uppercase tracking-wider text-slate-500">
+            Icone
+          </p>
+          <LabeledInput
+            label="Nom"
+            value={element.iconName}
+            onChange={(v) => onUpdateStyle({ iconName: v })}
+          />
+          <LabeledInput
+            label="Couleur"
+            type="color"
+            value={element.color}
+            onChange={(v) => onUpdateStyle({ color: v })}
+          />
+          <LabeledInput
+            label="Fond"
+            type="color"
+            value={element.background}
+            onChange={(v) => onUpdateStyle({ background: v })}
+          />
+          <LabeledInput
+            label="Taille"
+            type="number"
+            min={8}
+            max={220}
+            value={element.fontSize}
+            onChange={(v) =>
+              onUpdateStyle({ fontSize: toNumber(v, element.fontSize) })
+            }
+          />
+        </div>
+      )}
+
+      {element.type === "chart" && (
+        <div className="rounded-xl border border-slate-200 bg-white p-3 space-y-2">
+          <p className="text-xs font-semibold uppercase tracking-wider text-slate-500">
+            Graphique
+          </p>
+          <LabeledSelect
+            label="Type"
+            value={element.chartKind}
+            onChange={(value) => onUpdateStyle({ chartKind: value })}
+            options={[
+              { label: "Barres", value: "bar" },
+              { label: "Ligne", value: "line" },
+            ]}
+          />
+          <label className="block text-xs text-slate-600 font-medium">
+            Labels (separes par |)
+            <input
+              type="text"
+              value={element.labels.join(" | ")}
+              onChange={(event) =>
+                onUpdateStyle({
+                  labels: event.target.value
+                    .split("|")
+                    .map((item) => item.trim())
+                    .filter(Boolean),
+                })
+              }
+              className="mt-1 h-8 w-full rounded-md border border-slate-300 bg-white px-2 text-xs outline-none focus:border-sky-400"
+            />
+          </label>
+          <label className="block text-xs text-slate-600 font-medium">
+            Valeurs (separees par |)
+            <input
+              type="text"
+              value={element.values.join(" | ")}
+              onChange={(event) =>
+                onUpdateStyle({
+                  values: event.target.value
+                    .split("|")
+                    .map((item) => Number(item.trim()))
+                    .filter((item) => Number.isFinite(item)),
+                })
+              }
+              className="mt-1 h-8 w-full rounded-md border border-slate-300 bg-white px-2 text-xs outline-none focus:border-sky-400"
+            />
+          </label>
+          <LabeledInput
+            label="Trace"
+            type="color"
+            value={element.strokeColor}
+            onChange={(v) => onUpdateStyle({ strokeColor: v })}
+          />
+        </div>
+      )}
+
+      {element.type === "columns" && (
+        <div className="rounded-xl border border-slate-200 bg-white p-3 space-y-2">
+          <p className="text-xs font-semibold uppercase tracking-wider text-slate-500">
+            Colonnes
+          </p>
+          <LabeledInput
+            label="Gap"
+            type="number"
+            min={0}
+            max={160}
+            value={element.gap}
+            onChange={(v) => onUpdateStyle({ gap: toNumber(v, element.gap) })}
+          />
+          <LabeledInput
+            label="Titre"
+            type="color"
+            value={element.titleColor}
+            onChange={(v) => onUpdateStyle({ titleColor: v })}
+          />
+          <LabeledInput
+            label="Texte"
+            type="color"
+            value={element.textColor}
+            onChange={(v) => onUpdateStyle({ textColor: v })}
+          />
+          <label className="block text-xs text-slate-600 font-medium">
+            Colonnes (format: titre | item 1 | item 2, une colonne par ligne)
+            <textarea
+              value={element.columns.map((col) => col.join(" | ")).join("\n")}
+              onChange={(event) =>
+                onUpdateStyle({
+                  columns: event.target.value
+                    .split("\n")
+                    .map((line) => line.trim())
+                    .filter(Boolean)
+                    .map((line) =>
+                      line
+                        .split("|")
+                        .map((item) => item.trim())
+                        .filter(Boolean),
+                    ),
+                })
+              }
+              className="mt-1 min-h-24 w-full rounded-md border border-slate-300 bg-white px-2 py-1.5 text-xs outline-none focus:border-sky-400"
+            />
+          </label>
+        </div>
+      )}
+
+      {element.type === "group" && (
+        <div className="rounded-xl border border-slate-200 bg-white p-3 space-y-2">
+          <p className="text-xs font-semibold uppercase tracking-wider text-slate-500">
+            Groupe
+          </p>
+          <LabeledInput
+            label="Label"
+            value={element.label}
+            onChange={(v) => onUpdateStyle({ label: v })}
+          />
+          <LabeledInput
+            label="Fond"
+            type="color"
+            value={element.fill}
+            onChange={(v) => onUpdateStyle({ fill: v })}
+          />
+          <LabeledInput
+            label="Bordure"
+            type="color"
+            value={element.borderColor}
+            onChange={(v) => onUpdateStyle({ borderColor: v })}
+          />
+        </div>
+      )}
+
+      {element.type === "background" && (
+        <div className="rounded-xl border border-slate-200 bg-white p-3 space-y-2">
+          <p className="text-xs font-semibold uppercase tracking-wider text-slate-500">
+            Arriere-plan
+          </p>
+          <LabeledInput
+            label="Base"
+            type="color"
+            value={element.fill}
+            onChange={(v) => onUpdateStyle({ fill: v })}
+          />
+          <LabeledInput
+            label="Accent"
+            type="color"
+            value={element.accent}
+            onChange={(v) => onUpdateStyle({ accent: v })}
+          />
+          <LabeledSelect
+            label="Motif"
+            value={element.pattern}
+            onChange={(v) => onUpdateStyle({ pattern: v })}
+            options={[
+              { label: "Aucun", value: "none" },
+              { label: "Points", value: "dots" },
+              { label: "Grille", value: "grid" },
+            ]}
           />
         </div>
       )}

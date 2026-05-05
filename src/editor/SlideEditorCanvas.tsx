@@ -8,14 +8,15 @@ import {
   type SnapGuide,
   type SpacingMarker,
 } from "@/editor/layoutEngine";
+import { FIXED_BG_ELEMENT_ID } from "@/services/api";
 import type { EditorScene, SlideElement } from "@/services/api";
 import { useElementSize } from "@/presentation/useElementSize";
 
-const SEL = "#0d99ff";
 const HANDLE_PX = 9;
 const BORDER_PX = 1.5;
 const ROTATE_HANDLE_PX = 10;
 const MIN_SIZE = 20;
+const INTERACTION_BORDER_COLOR = "rgba(245,158,11,0.96)";
 
 interface DragInfo {
   ids: string[];
@@ -44,6 +45,8 @@ interface ResizeInfo {
   id: string;
   corner: ResizeHandle;
   text: boolean;
+  shapeElement: boolean;
+  baseShapeFontSize: number;
   sx: number;
   sy: number;
   ox: number;
@@ -63,6 +66,7 @@ interface RotateInfo {
 interface SlideEditorCanvasProps {
   scene: EditorScene;
   selectedIds: string[];
+  viewportZoom?: number;
   onSelectionChange: (ids: string[]) => void;
   onChangeElementGeometry: (
     id: string,
@@ -72,6 +76,12 @@ interface SlideEditorCanvasProps {
       width?: number;
       height?: number;
       rotation?: number;
+    },
+  ) => void;
+  onChangeElementStyle?: (
+    id: string,
+    patch: {
+      fontSize?: number;
     },
   ) => void;
   onUpdateTextContent?: (id: string, text: string) => void;
@@ -89,16 +99,25 @@ function iconFor(name: string): string {
 export function SlideEditorCanvas({
   scene,
   selectedIds,
+  viewportZoom = 1,
   onSelectionChange,
   onChangeElementGeometry,
+  onChangeElementStyle,
   onUpdateTextContent,
 }: SlideEditorCanvasProps) {
   const { ref: containerRef, size } = useElementSize<HTMLDivElement>();
   const sceneRef = useRef<HTMLDivElement>(null);
   const nodeMap = useRef<Map<string, HTMLDivElement>>(new Map());
   const [editingId, setEditingId] = useState<string | null>(null);
+  const [hoveredId, setHoveredId] = useState<string | null>(null);
   const [activeGuides, setActiveGuides] = useState<SnapGuide[]>([]);
   const [spacingMarkers, setSpacingMarkers] = useState<SpacingMarker[]>([]);
+
+  const isFixedBackgroundElement = useCallback(
+    (element: SlideElement) =>
+      element.type === "shape" && element.id === FIXED_BG_ELEMENT_ID,
+    [],
+  );
 
   const W = scene.width > 0 ? scene.width : 1600;
   const H = scene.height > 0 ? scene.height : 900;
@@ -240,6 +259,17 @@ export function SlideEditorCanvas({
         } else {
           patch.y = parseFloat(r.node.style.top);
           patch.height = parseFloat(r.node.style.height);
+
+          if (r.shapeElement && r.baseShapeFontSize > 0) {
+            const scaleX = patch.width / Math.max(1, r.ow);
+            const scaleY = patch.height / Math.max(1, r.oh);
+            const ratio = Math.max(0.25, Math.min(scaleX, scaleY));
+            const nextFontSize = Math.max(
+              8,
+              Math.min(220, r.baseShapeFontSize * ratio),
+            );
+            onChangeElementStyle?.(r.id, { fontSize: nextFontSize });
+          }
         }
 
         onChangeElementGeometry(r.id, patch);
@@ -266,12 +296,14 @@ export function SlideEditorCanvas({
       window.removeEventListener("mousemove", onMove);
       window.removeEventListener("mouseup", onUp);
     };
-  }, [toScene, onChangeElementGeometry]);
+  }, [toScene, onChangeElementGeometry, onChangeElementStyle]);
 
-  const hs = HANDLE_PX / scale;
-  const hb = 1.5 / scale;
-  const bw = BORDER_PX / scale;
-  const rh = ROTATE_HANDLE_PX / scale;
+  const effectiveZoom = Math.max(0.1, viewportZoom);
+  const zoomCompensation = Math.max(0.0001, scale * effectiveZoom);
+  const hs = HANDLE_PX / zoomCompensation;
+  const hb = 1.5 / zoomCompensation;
+  const bw = BORDER_PX / zoomCompensation;
+  const rh = ROTATE_HANDLE_PX / zoomCompensation;
 
   const renderElementContent = (el: SlideElement, editing: boolean) => {
     if (el.type === "text") {
@@ -323,7 +355,72 @@ export function SlideEditorCanvas({
       );
     }
 
-    if (el.type === "shape") return null;
+    if (el.type === "shape") {
+      if (editing) {
+        return (
+          <div
+            contentEditable
+            suppressContentEditableWarning
+            autoFocus
+            style={{
+              width: "100%",
+              minHeight: "1em",
+              color: el.textColor,
+              fontSize: el.fontSize,
+              fontWeight: el.fontWeight,
+              textAlign: el.textAlign,
+              whiteSpace: "pre-wrap",
+              wordBreak: "break-word",
+              outline: "none",
+              background: "rgba(255,255,255,0.32)",
+              borderRadius: 8,
+              padding: "6px 8px",
+            }}
+            onFocus={(e) => {
+              const range = document.createRange();
+              range.selectNodeContents(e.currentTarget);
+              const sel = window.getSelection();
+              sel?.removeAllRanges();
+              sel?.addRange(range);
+            }}
+            onBlur={(e) => {
+              const value = e.currentTarget.innerText;
+              if (value !== el.label) onUpdateTextContent?.(el.id, value);
+              setEditingId(null);
+            }}
+            onKeyDown={(e) => {
+              e.stopPropagation();
+              if (e.key === "Escape") {
+                e.preventDefault();
+                setEditingId(null);
+              }
+            }}
+          >
+            {el.label}
+          </div>
+        );
+      }
+
+      if (!el.label.trim()) return null;
+
+      return (
+        <div
+          style={{
+            width: "100%",
+            color: el.textColor,
+            fontSize: el.fontSize,
+            fontWeight: el.fontWeight,
+            textAlign: el.textAlign,
+            lineHeight: 1.2,
+            whiteSpace: "pre-wrap",
+            wordBreak: "break-word",
+            padding: "2px 6px",
+          }}
+        >
+          {el.label}
+        </div>
+      );
+    }
 
     if (el.type === "list") {
       const ListTag = el.ordered ? "ol" : "ul";
@@ -660,6 +757,7 @@ export function SlideEditorCanvas({
           >
             <div
               ref={sceneRef}
+              data-slide-scene="true"
               style={{
                 width: W,
                 height: H,
@@ -668,6 +766,17 @@ export function SlideEditorCanvas({
                 position: "relative",
                 background: scene.background || "#ffffff",
               }}
+              onMouseMove={(event) => {
+                const target = event.target as HTMLElement | null;
+                const wrapper = target?.closest<HTMLElement>(
+                  "[data-element-wrapper][data-element-id]",
+                );
+                const nextId = wrapper?.dataset.elementId ?? null;
+                setHoveredId((current) =>
+                  current === nextId ? current : nextId,
+                );
+              }}
+              onMouseLeave={() => setHoveredId(null)}
               onMouseDown={(event) => {
                 if (event.target === event.currentTarget) {
                   onSelectionChange([]);
@@ -678,20 +787,32 @@ export function SlideEditorCanvas({
               {elements.map((el) => {
                 const selected = selectedIds.includes(el.id);
                 const editing = editingId === el.id;
+                const hovered = hoveredId === el.id;
                 const isText = el.type === "text";
                 const isShape = el.type === "shape";
+                const isInlineEditable = isText || isShape;
+                const isFixedBackground = isFixedBackgroundElement(el);
                 const primarySelectedId = selectedIds[selectedIds.length - 1];
+                const defaultShadow = "none";
+                const interactionBorderWidth = bw;
+                const interactionActive =
+                  !editing &&
+                  (hovered ||
+                    selected ||
+                    (isFixedBackground && hoveredId !== null));
 
                 return (
                   <div
                     key={el.id}
                     data-element-wrapper
+                    data-element-id={el.id}
                     ref={(node) => {
                       if (node) nodeMap.current.set(el.id, node);
                       else nodeMap.current.delete(el.id);
                     }}
                     style={{
                       position: "absolute",
+                      zIndex: el.zIndex,
                       left: el.x,
                       top: el.y,
                       ...(isText
@@ -709,9 +830,20 @@ export function SlideEditorCanvas({
                         : undefined,
                       transformOrigin: "center center",
                       opacity: el.opacity,
-                      cursor: el.locked ? "default" : editing ? "text" : "move",
+                      cursor:
+                        el.locked || isFixedBackground
+                          ? "default"
+                          : editing
+                            ? "text"
+                            : "move",
                       userSelect: editing ? "text" : "none",
                       boxSizing: "border-box",
+                      boxShadow: defaultShadow,
+                      outline: interactionActive
+                        ? `${interactionBorderWidth}px solid ${INTERACTION_BORDER_COLOR}`
+                        : "none",
+                      outlineOffset: interactionActive ? "0px" : undefined,
+                      transition: "none",
                       ...(isText
                         ? {
                             color: el.color,
@@ -733,7 +865,7 @@ export function SlideEditorCanvas({
                             backgroundColor: el.fill,
                             border:
                               el.strokeWidth > 0
-                                ? `${el.strokeWidth}px solid ${el.stroke}`
+                                ? `${Math.max(1.5, el.strokeWidth)}px solid ${el.stroke}`
                                 : undefined,
                             borderRadius:
                               el.shape === "ellipse"
@@ -741,6 +873,15 @@ export function SlideEditorCanvas({
                                 : el.cornerRadius > 0
                                   ? el.cornerRadius
                                   : undefined,
+                            display: "flex",
+                            alignItems: "center",
+                            justifyContent:
+                              el.textAlign === "left"
+                                ? "flex-start"
+                                : el.textAlign === "right"
+                                  ? "flex-end"
+                                  : "center",
+                            padding: isFixedBackground ? 0 : "10px",
                           }
                         : {}),
                     }}
@@ -766,7 +907,7 @@ export function SlideEditorCanvas({
                         : [el.id];
                       if (!keepGroupSelection) onSelectionChange([el.id]);
 
-                      if (el.locked) return;
+                      if (el.locked || isFixedBackground) return;
 
                       const entries = dragIds
                         .map((id) => {
@@ -827,7 +968,13 @@ export function SlideEditorCanvas({
                       };
                     }}
                     onDoubleClick={() => {
-                      if (isText && !el.locked) setEditingId(el.id);
+                      if (
+                        isInlineEditable &&
+                        !el.locked &&
+                        !isFixedBackground
+                      ) {
+                        setEditingId(el.id);
+                      }
                     }}
                     onClick={(event) => event.stopPropagation()}
                   >
@@ -836,7 +983,8 @@ export function SlideEditorCanvas({
                     {selected &&
                       primarySelectedId === el.id &&
                       !editing &&
-                      !el.locked && (
+                      !el.locked &&
+                      !isFixedBackground && (
                         <SelectionOverlay
                           element={el}
                           bw={bw}
@@ -855,6 +1003,9 @@ export function SlideEditorCanvas({
                               id: el.id,
                               corner,
                               text: isText,
+                              shapeElement: el.type === "shape",
+                              baseShapeFontSize:
+                                el.type === "shape" ? el.fontSize : 0,
                               sx: sc.x,
                               sy: sc.y,
                               ox: el.x,
@@ -1014,13 +1165,39 @@ function SelectionOverlay({
         : 0;
   const isText = element.type === "text";
 
+  if (isText) {
+    return (
+      <>
+        {(["w", "e"] as const).map((side) => (
+          <div
+            key={side}
+            style={{
+              position: "absolute",
+              width: hs * 0.85,
+              height: hs * 0.85,
+              background: "#ffffff",
+              border: `${hb}px solid ${INTERACTION_BORDER_COLOR}`,
+              borderRadius: hb,
+              top: "50%",
+              transform: "translateY(-50%)",
+              ...(side === "w" ? { left: -hs / 2 } : { right: -hs / 2 }),
+              cursor: "ew-resize",
+              zIndex: 52,
+            }}
+            onMouseDown={(event) => onStartResize(side, event)}
+          />
+        ))}
+      </>
+    );
+  }
+
   return (
     <>
       <div
         style={{
           position: "absolute",
           inset: -bw,
-          border: `${bw}px solid ${SEL}`,
+          border: "none",
           borderRadius: radius,
           pointerEvents: "none",
         }}
@@ -1033,8 +1210,8 @@ function SelectionOverlay({
             position: "absolute",
             width: hs,
             height: hs,
-            background: "#fff",
-            border: `${hb}px solid ${SEL}`,
+            background: "#ffffff",
+            border: `${hb}px solid ${INTERACTION_BORDER_COLOR}`,
             borderRadius: hb,
             ...(corner.includes("n") ? { top: -hs / 2 } : { bottom: -hs / 2 }),
             ...(corner.includes("w") ? { left: -hs / 2 } : { right: -hs / 2 }),
@@ -1049,27 +1226,6 @@ function SelectionOverlay({
         />
       ))}
 
-      {isText &&
-        (["w", "e"] as const).map((side) => (
-          <div
-            key={side}
-            style={{
-              position: "absolute",
-              width: hs * 0.85,
-              height: hs * 0.85,
-              background: "#86efac",
-              border: `${hb}px solid #16a34a`,
-              borderRadius: hb,
-              top: "50%",
-              transform: "translateY(-50%)",
-              ...(side === "w" ? { left: -hs / 2 } : { right: -hs / 2 }),
-              cursor: "ew-resize",
-              zIndex: 52,
-            }}
-            onMouseDown={(event) => onStartResize(side, event)}
-          />
-        ))}
-
       <button
         type="button"
         style={{
@@ -1079,15 +1235,15 @@ function SelectionOverlay({
           width: rh * 2.2,
           height: rh * 2.2,
           borderRadius: "50%",
-          background: "#fff",
-          border: `${hb}px solid ${SEL}`,
+          background: "#ffffff",
+          border: `${hb}px solid ${INTERACTION_BORDER_COLOR}`,
           transform: "translateY(-50%)",
           cursor: "grab",
           zIndex: 55,
           display: "flex",
           alignItems: "center",
           justifyContent: "center",
-          color: SEL,
+          color: INTERACTION_BORDER_COLOR,
         }}
         aria-label="Tourner"
         onMouseDown={onStartRotate}

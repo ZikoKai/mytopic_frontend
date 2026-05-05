@@ -19,8 +19,12 @@ import type {
 import type { EditorTemplateType } from "@/editor/slideTemplates";
 import { createSceneFromTemplate } from "@/editor/slideTemplates";
 import {
+  createMediaElement,
   createEditorSceneFromSlide,
+  ensureFixedBackgroundShape,
+  FIXED_BG_ELEMENT_ID,
   createSavedPresentation,
+  generateImageFromPrompt,
   generatePresentation,
   getSavedPresentation,
   listSavedPresentations,
@@ -64,6 +68,11 @@ interface PresentationState {
     slideIndex: number,
     type: "list" | "table" | "media" | "icon" | "chart" | "columns" | "group",
   ) => void;
+  addGeneratedImageToSlide: (
+    slideIndex: number,
+    src: string,
+    alt?: string,
+  ) => string | null;
   applyTemplateToSlide: (
     slideIndex: number,
     template: EditorTemplateType,
@@ -342,8 +351,73 @@ export const usePresentationStore = create<PresentationState>((set, get) => ({
     set({ loading: true, error: null, presentation: null });
     try {
       const data = await generatePresentation(topic, language);
-      const title = data.presentation_title || topic;
-      const created = await createSavedPresentation(title, data);
+      const enriched: Presentation = {
+        ...data,
+        slides: data.slides.map((slide) => ({
+          ...slide,
+          editor_scene: {
+            ...slide.editor_scene,
+            elements: [...slide.editor_scene.elements],
+          },
+        })),
+      };
+
+      const visualTargets = enriched.slides
+        .map((slide, index) => ({
+          index,
+          prompt: (slide.suggested_visual ?? "").trim(),
+        }))
+        .filter((target) => target.prompt.length > 0)
+        .slice(0, 3);
+
+      if (visualTargets.length > 0) {
+        const imageResults = await Promise.allSettled(
+          visualTargets.map((target) =>
+            generateImageFromPrompt(
+              `Professional presentation visual, high quality, realistic: ${target.prompt}`,
+              "1536x1024",
+            ),
+          ),
+        );
+
+        imageResults.forEach((result, resultIndex) => {
+          if (result.status !== "fulfilled") return;
+          const target = visualTargets[resultIndex];
+          const slide = enriched.slides[target.index];
+          if (!slide) return;
+
+          let mediaElement = slide.editor_scene.elements.find(
+            (element) => element.type === "media",
+          );
+
+          if (!mediaElement) {
+            mediaElement = createMediaElement(
+              `media-auto-${target.index}`,
+              slide.editor_scene.elements.length,
+              {
+                x: 820,
+                y: 120,
+                width: 680,
+                height: 420,
+                mediaKind: "image",
+                src: "",
+                alt: target.prompt,
+                fit: "cover",
+                borderRadius: 20,
+                background: "#e2e8f0",
+              },
+            );
+            slide.editor_scene.elements.push(mediaElement);
+          }
+
+          if (mediaElement.type !== "media") return;
+          mediaElement.src = result.value.image_data_url;
+          mediaElement.alt = target.prompt;
+        });
+      }
+
+      const title = enriched.presentation_title || topic;
+      const created = await createSavedPresentation(title, enriched);
       const presentations = await listSavedPresentations();
       set({
         presentation: created.presentation,
@@ -462,16 +536,33 @@ export const usePresentationStore = create<PresentationState>((set, get) => ({
           purpose,
           main_content: mainContent,
           speaker_notes: String(slide.speaker_notes ?? ""),
-          editor_scene:
+          editor_scene: ensureFixedBackgroundShape(
             slide.editor_scene ??
-            createEditorSceneFromSlide(
-              {
-                title,
-                purpose,
-                main_content: mainContent,
-              },
-              index,
-            ),
+              createEditorSceneFromSlide(
+                {
+                  slide_number: index + 1,
+                  slide_type: slide.slide_type ?? "content",
+                  semantic_type: slide.semantic_type ?? "content.paragraph",
+                  layout_variant: slide.layout_variant ?? "text-left-accent",
+                  density: slide.density ?? "balanced",
+                  title,
+                  purpose,
+                  content_format: slide.content_format ?? "paragraph",
+                  main_content: mainContent,
+                  speaker_notes: String(slide.speaker_notes ?? ""),
+                  suggested_visual: slide.suggested_visual ?? null,
+                  transition_to_next: String(slide.transition_to_next ?? ""),
+                  editor_scene: {
+                    version: "1.0",
+                    width: 1600,
+                    height: 900,
+                    background: "#ffffff",
+                    elements: [],
+                  },
+                },
+                index,
+              ),
+          ),
         };
       });
 
@@ -500,20 +591,19 @@ export const usePresentationStore = create<PresentationState>((set, get) => ({
 
       const nextIndex = slideIndex + 1;
       const newTitle = `Nouvelle slide ${slides.length + 1}`;
-      const newSlide: Slide = {
+      const draftSlide: Slide = {
         ...base,
         title: newTitle,
         purpose: "Ajoutez votre contenu",
         main_content: ["Nouveau point"],
         speaker_notes: "",
-        editor_scene: createEditorSceneFromSlide(
-          {
-            title: newTitle,
-            purpose: "Ajoutez votre contenu",
-            main_content: ["Nouveau point"],
-          },
-          nextIndex,
-        ),
+        semantic_type: "content.paragraph",
+        layout_variant: "text-left-accent",
+        content_format: "paragraph",
+      };
+      const newSlide: Slide = {
+        ...draftSlide,
+        editor_scene: createEditorSceneFromSlide(draftSlide, nextIndex),
       };
 
       slides.splice(slideIndex + 1, 0, newSlide);
@@ -646,11 +736,16 @@ export const usePresentationStore = create<PresentationState>((set, get) => ({
             zIndex: scene.elements.length,
             locked: false,
             visible: true,
-            opacity: 0.95,
-            fill: "#e2e8f0",
-            stroke: "#64748b",
-            strokeWidth: 2,
+            opacity: 1,
+            fill: "#ffffff",
+            stroke: "#94a3b8",
+            strokeWidth: 1.5,
             cornerRadius: shape === "rect" ? 18 : 0,
+            label: "",
+            textColor: "#0f172a",
+            fontSize: 28,
+            fontWeight: 600,
+            textAlign: "center",
           };
 
           return {
@@ -700,6 +795,54 @@ export const usePresentationStore = create<PresentationState>((set, get) => ({
     });
   },
 
+  addGeneratedImageToSlide: (slideIndex, src, alt) => {
+    let insertedId: string | null = null;
+
+    set((state) => {
+      if (!state.presentation) return state;
+
+      const presentation = withUpdatedSlide(
+        state.presentation,
+        slideIndex,
+        (slide) => {
+          const scene = slide.editor_scene;
+          const baseElement = buildNewElement("media", scene.elements.length);
+          if (baseElement.type !== "media") {
+            return slide;
+          }
+
+          insertedId = nextId("media");
+          const mediaElement: MediaSlideElement = {
+            ...baseElement,
+            id: insertedId,
+            mediaKind: "image",
+            src,
+            alt: alt?.trim() || "Image generee",
+          };
+
+          return {
+            ...slide,
+            editor_scene: {
+              ...scene,
+              elements: normalizeSceneElements([
+                ...scene.elements,
+                mediaElement,
+              ]),
+            },
+          };
+        },
+      );
+
+      return {
+        ...state,
+        dirty: true,
+        presentation,
+      };
+    });
+
+    return insertedId;
+  },
+
   applyTemplateToSlide: (slideIndex, template) => {
     set((state) => {
       if (!state.presentation) return state;
@@ -709,7 +852,9 @@ export const usePresentationStore = create<PresentationState>((set, get) => ({
         slideIndex,
         (slide) => ({
           ...slide,
-          editor_scene: createSceneFromTemplate(template),
+          editor_scene: ensureFixedBackgroundShape(
+            createSceneFromTemplate(template),
+          ),
         }),
       );
 
@@ -774,9 +919,29 @@ export const usePresentationStore = create<PresentationState>((set, get) => ({
         (slide) => {
           const scene = slide.editor_scene;
           const elements = scene.elements.map((element) => {
-            if (element.id !== elementId || element.locked) {
+            if (element.id !== elementId) {
               return element;
             }
+
+            const isFixedBackground =
+              element.type === "shape" && element.id === FIXED_BG_ELEMENT_ID;
+            if (element.locked && !isFixedBackground) {
+              return element;
+            }
+
+            if (isFixedBackground) {
+              const next: SlideElement = {
+                ...element,
+                fill:
+                  typeof patch.fill === "string" ? patch.fill : element.fill,
+                opacity:
+                  typeof patch.opacity === "number"
+                    ? patch.opacity
+                    : element.opacity,
+              };
+              return next;
+            }
+
             return {
               ...element,
               ...patch,
@@ -972,12 +1137,26 @@ export const usePresentationStore = create<PresentationState>((set, get) => ({
         (slide) => {
           const scene = slide.editor_scene;
           const elements = scene.elements.map((element) => {
-            if (element.id !== elementId || element.type !== "text") {
+            if (element.id !== elementId) {
               return element;
             }
+
+            if (element.type === "text") {
+              return {
+                ...element,
+                text,
+              };
+            }
+
+            if (element.type === "shape") {
+              return {
+                ...element,
+                label: text,
+              };
+            }
+
             return {
               ...element,
-              text,
             };
           });
 
@@ -1082,6 +1261,12 @@ export const usePresentationStore = create<PresentationState>((set, get) => ({
         slideIndex,
         (slide) => {
           const scene = slide.editor_scene;
+          const target = scene.elements.find(
+            (element) => element.id === elementId,
+          );
+          if (!target || target.locked) {
+            return slide;
+          }
           const elements = normalizeSceneElements(
             scene.elements.filter((element) => element.id !== elementId),
           );
@@ -1116,7 +1301,7 @@ export const usePresentationStore = create<PresentationState>((set, get) => ({
           const source = scene.elements.find(
             (element) => element.id === elementId,
           );
-          if (!source) {
+          if (!source || source.locked) {
             return slide;
           }
 
@@ -1157,9 +1342,15 @@ export const usePresentationStore = create<PresentationState>((set, get) => ({
         slideIndex,
         (slide) => {
           const scene = slide.editor_scene;
+          const allowedElements = elementsToPaste.filter(
+            (element) => !element.locked,
+          );
+          if (allowedElements.length === 0) {
+            return slide;
+          }
           const startZIndex = scene.elements.length;
 
-          const pastedElements = elementsToPaste.map((element, index) => {
+          const pastedElements = allowedElements.map((element, index) => {
             const clone = JSON.parse(JSON.stringify(element)) as SlideElement;
             const id = nextId(clone.type);
             insertedIds.push(id);

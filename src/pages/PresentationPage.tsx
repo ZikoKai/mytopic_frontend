@@ -1,6 +1,7 @@
 import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { parseAsInteger, useQueryState } from "nuqs";
+import { TransformComponent, TransformWrapper } from "react-zoom-pan-pinch";
 import {
   AlignCenter,
   AlignLeft,
@@ -8,26 +9,31 @@ import {
   ArrowUpDown,
   BarChart3,
   Bold,
+  Check,
   ChevronLeft,
   ChevronRight,
   Circle,
+  Copy,
   Ellipsis,
   Italic,
-  FileOutput,
+  Download,
   Layers,
+  Link2,
+  Loader2,
   Minus,
   PanelsLeftRight,
   Palette,
   Plus,
-  Strikethrough,
+  Share2,
   Square,
   Table,
   StickyNote,
+  Trash2,
   Type,
-  Underline,
   Image as ImageIcon,
 } from "lucide-react";
 import { toast } from "sonner";
+import { exportToPdf, exportToPptx } from "@/services/exportPresentation";
 
 import { Button } from "@/components/ui/button";
 import { UserProfileMenu } from "@/components/auth/UserProfileMenu";
@@ -35,8 +41,16 @@ import {
   TEMPLATE_OPTIONS,
   type EditorTemplateType,
 } from "@/editor/slideTemplates";
+import { ZoomControls } from "@/editor/ZoomControls";
 import { SLIDE_ASPECT_RATIO } from "@/presentation/primitives";
 import { cn } from "@/lib/utils";
+import {
+  deleteFavoriteImageAsset,
+  generateImageFromPrompt,
+  listFavoriteImageAssets,
+  saveFavoriteImageAsset,
+  type FavoriteImageAsset,
+} from "@/services/api";
 import { usePresentationStore } from "@/store/presentationStore";
 import type { SlideElement } from "@/services/api";
 
@@ -47,7 +61,7 @@ const SlideEditorCanvas = lazy(() =>
 );
 
 const THUMB_ITEM_SIZE = 124;
-type SidebarMode = "templates" | "elements";
+type SidebarMode = "templates" | "elements" | "uploads";
 
 export default function PresentationPage() {
   const LAST_PRESENTATION_KEY = "mytopic_last_presentation_id";
@@ -73,6 +87,7 @@ export default function PresentationPage() {
     addTextElementToSlide,
     addShapeElementToSlide,
     addElementToSlide,
+    addGeneratedImageToSlide,
     applyTemplateToSlide,
     updateElementGeometry,
     updateElementStyle,
@@ -88,6 +103,22 @@ export default function PresentationPage() {
   const [menuParam, setMenuParam] = useQueryState("menu");
   const [showNotes, setShowNotes] = useState(false);
   const [showExportMenu, setShowExportMenu] = useState(false);
+  const [exporting, setExporting] = useState<"pdf" | "pptx" | null>(null);
+  const [showImageMenu, setShowImageMenu] = useState(false);
+  const [imagePrompt, setImagePrompt] = useState("");
+  const [imageSize, setImageSize] = useState<
+    "1024x1024" | "1024x1536" | "1536x1024"
+  >("1024x1024");
+  const [imageGenerating, setImageGenerating] = useState(false);
+  const [lastGeneratedImage, setLastGeneratedImage] = useState<{
+    dataUrl: string;
+    prompt: string;
+    mimeType: string;
+  } | null>(null);
+  const [uploads, setUploads] = useState<FavoriteImageAsset[]>([]);
+  const [loadingUploads, setLoadingUploads] = useState(false);
+  const [savingFavorite, setSavingFavorite] = useState(false);
+  const [workspaceZoom, setWorkspaceZoom] = useState(1);
   const [openSlideMenuIndex, setOpenSlideMenuIndex] = useState<number | null>(
     null,
   );
@@ -98,9 +129,20 @@ export default function PresentationPage() {
     scrollLeft: 0,
     width: 0,
   });
+  const [collapsedGroups, setCollapsedGroups] = useState<
+    Record<string, boolean>
+  >({
+    common: false,
+    text: false,
+    shape: false,
+  });
 
   const activeSidebarMode: SidebarMode | null =
-    menuParam === "templates" || menuParam === "elements" ? menuParam : null;
+    menuParam === "templates" ||
+    menuParam === "elements" ||
+    menuParam === "uploads"
+      ? menuParam
+      : null;
 
   const pendingRouteLoadRef = useRef<string | null>(null);
   const clipboardElementsRef = useRef<SlideElement[]>([]);
@@ -117,7 +159,6 @@ export default function PresentationPage() {
 
   const selectedElementId =
     selectedElementIds[selectedElementIds.length - 1] ?? null;
-  const isEditingOnSlide = selectedElementIds.length > 0;
 
   const selectedElement = useMemo<SlideElement | null>(() => {
     if (!scene || !selectedElementId) return null;
@@ -135,9 +176,32 @@ export default function PresentationPage() {
     [selectedElement],
   );
 
+  const selectedShapeElement = useMemo(
+    () =>
+      selectedElement && selectedElement.type === "shape"
+        ? selectedElement
+        : null,
+    [selectedElement],
+  );
+
+  const selectedMediaElement = useMemo(
+    () =>
+      selectedElement && selectedElement.type === "media"
+        ? selectedElement
+        : null,
+    [selectedElement],
+  );
+
   const adjustSelectedStyle = (patch: Record<string, unknown>) => {
     if (!selectedElementId) return;
     updateElementStyle(safeCurrentSlide, selectedElementId, patch);
+  };
+
+  const toggleToolbarGroup = (groupKey: "common" | "text" | "shape") => {
+    setCollapsedGroups((current) => ({
+      ...current,
+      [groupKey]: !current[groupKey],
+    }));
   };
 
   const adjustFontSize = (delta: number) => {
@@ -200,6 +264,183 @@ export default function PresentationPage() {
     setSelectedTemplate(template);
     applyTemplateToSlide(safeCurrentSlide, template);
     setSelectedElementIds([]);
+  };
+
+  const handleGenerateImage = async () => {
+    const prompt = imagePrompt.trim();
+    if (!prompt || imageGenerating) return;
+
+    setImageGenerating(true);
+    try {
+      const generated = await generateImageFromPrompt(prompt, imageSize);
+      setLastGeneratedImage({
+        dataUrl: generated.image_data_url,
+        prompt,
+        mimeType: generated.mime_type,
+      });
+
+      if (selectedMediaElement) {
+        updateElementStyle(safeCurrentSlide, selectedMediaElement.id, {
+          mediaKind: "image",
+          src: generated.image_data_url,
+          alt: prompt,
+        });
+        setSelectedElementIds([selectedMediaElement.id]);
+      } else {
+        const insertedId = addGeneratedImageToSlide(
+          safeCurrentSlide,
+          generated.image_data_url,
+          prompt,
+        );
+        if (insertedId) {
+          setSelectedElementIds([insertedId]);
+        }
+      }
+
+      toast.success("Image generee et ajoutee a la slide.");
+      setShowImageMenu(false);
+    } catch (cause) {
+      const message =
+        cause instanceof Error && cause.message
+          ? cause.message
+          : "Echec de generation de l'image.";
+      toast.error(message);
+    } finally {
+      setImageGenerating(false);
+    }
+  };
+
+  const loadUploads = async () => {
+    setLoadingUploads(true);
+    try {
+      const data = await listFavoriteImageAssets();
+      setUploads(data);
+    } catch {
+      toast.error("Impossible de charger les favoris image.");
+    } finally {
+      setLoadingUploads(false);
+    }
+  };
+
+  const saveCurrentGeneratedToFavorites = async () => {
+    if (!lastGeneratedImage || savingFavorite) return;
+    setSavingFavorite(true);
+    try {
+      const asset = await saveFavoriteImageAsset({
+        title: lastGeneratedImage.prompt.slice(0, 80),
+        prompt: lastGeneratedImage.prompt,
+        image_data_url: lastGeneratedImage.dataUrl,
+        mime_type: lastGeneratedImage.mimeType,
+      });
+      setUploads((prev) => [asset, ...prev]);
+      toast.success("Image ajoutee aux favoris.");
+    } catch {
+      toast.error("Impossible de sauvegarder l'image en favoris.");
+    } finally {
+      setSavingFavorite(false);
+    }
+  };
+
+  const insertFavoriteImageInSlide = (asset: FavoriteImageAsset) => {
+    if (selectedMediaElement) {
+      updateElementStyle(safeCurrentSlide, selectedMediaElement.id, {
+        mediaKind: "image",
+        src: asset.image_data_url,
+        alt: asset.prompt || asset.title,
+      });
+      setSelectedElementIds([selectedMediaElement.id]);
+      return;
+    }
+
+    const insertedId = addGeneratedImageToSlide(
+      safeCurrentSlide,
+      asset.image_data_url,
+      asset.prompt || asset.title,
+    );
+    if (insertedId) {
+      setSelectedElementIds([insertedId]);
+    }
+  };
+
+  const removeFavorite = async (assetId: string) => {
+    try {
+      await deleteFavoriteImageAsset(assetId);
+      setUploads((prev) => prev.filter((item) => item.id !== assetId));
+      toast.success("Image favorite supprimee.");
+    } catch {
+      toast.error("Suppression impossible.");
+    }
+  };
+
+  const buildShareUrl = () => {
+    if (typeof window === "undefined") return "";
+    const baseId = presentationId || routePresentationId;
+    if (!baseId) return window.location.href;
+    return `${window.location.origin}/presentation/${baseId}`;
+  };
+
+  const [linkCopied, setLinkCopied] = useState(false);
+  const [exportDone, setExportDone] = useState<"pdf" | "pptx" | null>(null);
+
+  const handleCopyPublicLink = async () => {
+    try {
+      const url = buildShareUrl();
+      await navigator.clipboard.writeText(url);
+      setLinkCopied(true);
+      setTimeout(() => setLinkCopied(false), 2000);
+    } catch {
+      toast.error("Impossible de copier le lien.");
+    }
+  };
+
+  const handleDownloadPdf = async () => {
+    if (!presentation || presentation.slides.length === 0) {
+      toast.error("Aucune slide a exporter.");
+      return;
+    }
+    const originalSlide = safeCurrentSlide;
+    setExporting("pdf");
+    setExportDone(null);
+    setSelectedElementIds([]);
+    try {
+      await exportToPdf(
+        presentation,
+        (i) => void setSlideParam(i),
+      );
+      setExportDone("pdf");
+      setTimeout(() => setExportDone(null), 3000);
+    } catch (err) {
+      console.error("PDF export error:", err);
+      toast.error("Echec de generation du fichier PDF.");
+    } finally {
+      setExporting(null);
+      void setSlideParam(originalSlide);
+    }
+  };
+
+  const handleDownloadPowerPoint = async () => {
+    if (!presentation || presentation.slides.length === 0) {
+      toast.error("Aucune slide a exporter.");
+      return;
+    }
+    const originalSlide = safeCurrentSlide;
+    setExporting("pptx");
+    setExportDone(null);
+    setSelectedElementIds([]);
+    try {
+      await exportToPptx(
+        presentation,
+        (i) => void setSlideParam(i),
+      );
+      setExportDone("pptx");
+      setTimeout(() => setExportDone(null), 3000);
+    } catch (err) {
+      console.error("PPTX export error:", err);
+      toast.error("Echec de generation du fichier PowerPoint.");
+    } finally {
+      setExporting(null);
+      void setSlideParam(originalSlide);
+    }
   };
 
   const toggleSidebarMode = (mode: SidebarMode) => {
@@ -300,9 +541,37 @@ export default function PresentationPage() {
     thumbViewport.width,
   ]);
 
+  // Close menus on click outside
+  useEffect(() => {
+    const handler = (e: MouseEvent) => {
+      const target = e.target as HTMLElement | null;
+      if (!target) return;
+      if (showExportMenu && !target.closest('[data-export-menu="true"]')) {
+        setShowExportMenu(false);
+      }
+      if (showImageMenu && !target.closest('[data-image-menu="true"]')) {
+        setShowImageMenu(false);
+      }
+      if (
+        openSlideMenuIndex !== null &&
+        !target.closest('[data-slide-menu="true"]')
+      ) {
+        setOpenSlideMenuIndex(null);
+      }
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [showExportMenu, showImageMenu, openSlideMenuIndex]);
+
   useEffect(() => {
     void refreshUserPresentations();
   }, [refreshUserPresentations]);
+
+  useEffect(() => {
+    if (activeSidebarMode === "uploads") {
+      void loadUploads();
+    }
+  }, [activeSidebarMode]);
 
   useEffect(() => {
     if (presentationId) {
@@ -584,6 +853,82 @@ export default function PresentationPage() {
         </div>
 
         <div className="flex items-center gap-2">
+          <div className="relative" data-image-menu="true">
+            <Button
+              variant="outline"
+              size="sm"
+              className="gap-2 rounded-lg cursor-pointer text-sm px-3 py-2 h-auto"
+              onClick={() => setShowImageMenu((value) => !value)}
+            >
+              <ImageIcon className="size-4" />
+              <span className="hidden md:inline">Image IA</span>
+            </Button>
+
+            {showImageMenu && (
+              <div className="absolute right-0 top-10 z-50 w-80 rounded-lg border border-border/50 bg-background shadow-sm p-2.5 space-y-2">
+                <p className="text-xs font-semibold text-foreground">
+                  Generer une image depuis un prompt
+                </p>
+                <textarea
+                  value={imagePrompt}
+                  onChange={(event) => setImagePrompt(event.target.value)}
+                  rows={3}
+                  placeholder="Ex: Illustration moderne sur l'energie solaire"
+                  className="w-full resize-none rounded-lg border border-border/70 bg-background px-2.5 py-2 text-xs text-foreground outline-none focus-visible:border-ring"
+                />
+
+                <div className="flex items-center gap-2">
+                  <select
+                    value={imageSize}
+                    onChange={(event) =>
+                      setImageSize(
+                        event.target.value as
+                          | "1024x1024"
+                          | "1024x1536"
+                          | "1536x1024",
+                      )
+                    }
+                    className="h-8 rounded-md border border-border/70 bg-background px-2 text-xs text-foreground"
+                  >
+                    <option value="1024x1024">Carre 1024</option>
+                    <option value="1536x1024">Paysage 1536x1024</option>
+                    <option value="1024x1536">Portrait 1024x1536</option>
+                  </select>
+
+                  <Button
+                    size="sm"
+                    className="h-8 px-3 text-xs font-semibold"
+                    onClick={() => void handleGenerateImage()}
+                    disabled={
+                      imageGenerating || imagePrompt.trim().length === 0
+                    }
+                  >
+                    {imageGenerating ? "Generation..." : "Generer"}
+                  </Button>
+                </div>
+
+                <p className="text-[11px] text-muted-foreground leading-relaxed">
+                  Si un element media est selectionne, il sera remplace. Sinon,
+                  un nouvel element image est ajoute automatiquement.
+                </p>
+
+                {lastGeneratedImage && (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="h-8 px-3 text-xs font-semibold"
+                    onClick={() => void saveCurrentGeneratedToFavorites()}
+                    disabled={savingFavorite}
+                  >
+                    {savingFavorite
+                      ? "Sauvegarde..."
+                      : "Enregistrer dans favoris"}
+                  </Button>
+                )}
+              </div>
+            )}
+          </div>
+
           <button
             onClick={() => setShowNotes((v) => !v)}
             className={cn(
@@ -604,25 +949,110 @@ export default function PresentationPage() {
               className="gap-2 rounded-lg cursor-pointer font-semibold text-sm px-4 py-2 h-auto bg-primary text-primary-foreground hover:bg-primary/90 border border-primary/20"
               onClick={() => setShowExportMenu((value) => !value)}
             >
-              <FileOutput className="size-4" />
-              <span className="inline">Exporter</span>
+              <Share2 className="size-4" />
+              <span className="inline">Partager</span>
             </Button>
 
             {showExportMenu && (
-              <div className="absolute right-0 top-11 z-50 min-w-44 rounded-xl border border-border/60 bg-background shadow-lg p-1.5">
-                {[
-                  "Exporter en PowerPoint",
-                  "Exporter en PDF",
-                  "Exporter en JSON",
-                ].map((item) => (
+              <div className="absolute right-0 top-10 z-50 w-72 rounded-lg border border-border/50 bg-background shadow-sm p-2.5">
+                <div className="mb-2">
+                  <p className="text-sm font-semibold text-foreground">
+                    Partager la presentation
+                  </p>
+                  <p className="text-[11px] text-muted-foreground">
+                    Lien public ou telechargement.
+                  </p>
+                </div>
+
+                <button
+                  onClick={() => void handleCopyPublicLink()}
+                  className="flex w-full items-center gap-2.5 rounded-md border border-primary/20 bg-primary/8 px-2.5 py-2 text-left transition-colors hover:bg-primary/15"
+                >
+                  <span className="flex size-8 items-center justify-center rounded-md bg-primary text-primary-foreground">
+                    <Link2 className="size-3.5" />
+                  </span>
+                  <span className="flex flex-col flex-1">
+                    <span className="text-[13px] font-semibold text-foreground">
+                      Copier le lien public
+                    </span>
+                    <span className="text-[10px] text-muted-foreground">
+                      Partager avec votre audience.
+                    </span>
+                  </span>
+                  {linkCopied ? (
+                    <Check className="ml-auto size-4 text-green-600" />
+                  ) : (
+                    <Copy className="ml-auto size-3.5 text-muted-foreground" />
+                  )}
+                </button>
+
+                <div className="my-2 h-px bg-border/50" />
+
+                <p className="mb-1.5 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+                  Telechargements
+                </p>
+
+                <div className="space-y-1">
                   <button
-                    key={item}
-                    onClick={() => setShowExportMenu(false)}
-                    className="flex w-full items-center rounded-lg px-3 py-2 text-left text-sm text-foreground hover:bg-muted transition-colors cursor-pointer"
+                    onClick={() => void handleDownloadPdf()}
+                    disabled={exporting !== null}
+                    className="flex w-full items-center gap-2.5 rounded-md px-2.5 py-2 text-left transition-colors hover:bg-muted disabled:opacity-50"
                   >
-                    {item}
+                    <span className="flex size-8 items-center justify-center rounded-md bg-red-50">
+                      <svg width="20" height="20" viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg">
+                        <path d="M6 2h14l8 8v18a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2z" fill="#E53E3E"/>
+                        <path d="M20 2v8h8" fill="#C53030"/>
+                        <path d="M20 2l8 8h-8V2z" fill="#FC8181" fillOpacity="0.4"/>
+                        <text x="16" y="23" textAnchor="middle" fontFamily="Arial,sans-serif" fontWeight="700" fontSize="9" fill="#fff">PDF</text>
+                      </svg>
+                    </span>
+                    <span className="flex flex-col flex-1">
+                      <span className="text-[13px] font-semibold text-foreground">
+                        Telecharger en PDF
+                      </span>
+                      <span className="text-[10px] text-muted-foreground">
+                        Lecture et partage universel.
+                      </span>
+                    </span>
+                    {exporting === "pdf" ? (
+                      <Loader2 className="ml-auto size-4 text-muted-foreground animate-spin" />
+                    ) : exportDone === "pdf" ? (
+                      <Check className="ml-auto size-4 text-green-600" />
+                    ) : (
+                      <Download className="ml-auto size-3.5 text-muted-foreground" />
+                    )}
                   </button>
-                ))}
+
+                  <button
+                    onClick={() => void handleDownloadPowerPoint()}
+                    disabled={exporting !== null}
+                    className="flex w-full items-center gap-2.5 rounded-md px-2.5 py-2 text-left transition-colors hover:bg-muted disabled:opacity-50"
+                  >
+                    <span className="flex size-8 items-center justify-center rounded-md bg-orange-50">
+                      <svg width="20" height="20" viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg">
+                        <path d="M6 2h14l8 8v18a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2z" fill="#D97706"/>
+                        <path d="M20 2v8h8" fill="#B45309"/>
+                        <path d="M20 2l8 8h-8V2z" fill="#FCD34D" fillOpacity="0.4"/>
+                        <text x="16" y="23" textAnchor="middle" fontFamily="Arial,sans-serif" fontWeight="700" fontSize="7.5" fill="#fff">PPTX</text>
+                      </svg>
+                    </span>
+                    <span className="flex flex-col flex-1">
+                      <span className="text-[13px] font-semibold text-foreground">
+                        Telecharger en PowerPoint
+                      </span>
+                      <span className="text-[10px] text-muted-foreground">
+                        Presentation editable .pptx.
+                      </span>
+                    </span>
+                    {exporting === "pptx" ? (
+                      <Loader2 className="ml-auto size-4 text-muted-foreground animate-spin" />
+                    ) : exportDone === "pptx" ? (
+                      <Check className="ml-auto size-4 text-green-600" />
+                    ) : (
+                      <Download className="ml-auto size-3.5 text-muted-foreground" />
+                    )}
+                  </button>
+                </div>
               </div>
             )}
           </div>
@@ -668,6 +1098,18 @@ export default function PresentationPage() {
                 <Plus className="size-5" />
                 <span className="text-[11px] font-semibold">Elements</span>
               </button>
+              <button
+                onClick={() => toggleSidebarMode("uploads")}
+                className={cn(
+                  "flex w-full flex-col items-center gap-1 rounded-xl px-2 py-2 transition-colors",
+                  activeSidebarMode === "uploads"
+                    ? "bg-slate-100 text-slate-900"
+                    : "text-slate-500 hover:bg-slate-50 hover:text-slate-800",
+                )}
+              >
+                <ImageIcon className="size-5" />
+                <span className="text-[11px] font-semibold">Uploads</span>
+              </button>
             </div>
 
             {activeSidebarMode && (
@@ -704,7 +1146,7 @@ export default function PresentationPage() {
                       ))}
                     </div>
                   </div>
-                ) : (
+                ) : activeSidebarMode === "elements" ? (
                   <div>
                     <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500">
                       Ajouter des elements
@@ -729,6 +1171,52 @@ export default function PresentationPage() {
                       })}
                     </div>
                   </div>
+                ) : (
+                  <div>
+                    <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500">
+                      Uploads / Favoris
+                    </p>
+
+                    {loadingUploads ? (
+                      <p className="text-xs text-slate-500">Chargement...</p>
+                    ) : uploads.length === 0 ? (
+                      <p className="text-xs text-slate-500">
+                        Aucune image favorite pour le moment.
+                      </p>
+                    ) : (
+                      <div className="grid grid-cols-2 gap-2">
+                        {uploads.map((asset) => (
+                          <div
+                            key={asset.id}
+                            className="rounded-xl border border-slate-200 bg-white p-2"
+                          >
+                            <button
+                              onClick={() => insertFavoriteImageInSlide(asset)}
+                              className="w-full overflow-hidden rounded-lg border border-slate-200 bg-slate-50"
+                            >
+                              <img
+                                src={asset.image_data_url}
+                                alt={asset.title || "favorite"}
+                                className="h-22 w-full object-cover"
+                              />
+                            </button>
+                            <div className="mt-1 flex items-center justify-between gap-1">
+                              <p className="truncate text-[10px] font-medium text-slate-600">
+                                {asset.title || asset.prompt || "Image"}
+                              </p>
+                              <button
+                                onClick={() => void removeFavorite(asset.id)}
+                                className="flex size-5 items-center justify-center rounded-md text-slate-500 hover:bg-slate-100 hover:text-red-600"
+                                aria-label="Supprimer favori"
+                              >
+                                <Trash2 className="size-3" />
+                              </button>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
                 )}
               </div>
             )}
@@ -742,212 +1230,362 @@ export default function PresentationPage() {
             </div>
           )}
 
-          <div className="min-h-0 flex items-start justify-center px-2 md:px-4 lg:px-6 pt-16 pb-4">
-            <div
-              className="relative w-full max-w-none"
-              style={{
-                width: "min(100%, calc((100vh - 260px) * 16 / 9))",
-              }}
+          <div className="min-h-0 relative flex-1 px-2 md:px-4 lg:px-6 pt-16 pb-4">
+            <TransformWrapper
+              minScale={0.25}
+              maxScale={3}
+              initialScale={1}
+              wheel={{ step: 0.12 }}
+              panning={{ disabled: true }}
+              doubleClick={{ disabled: true }}
+              onTransform={(_, state) => setWorkspaceZoom(state.scale)}
             >
-              <div
-                className="w-full overflow-hidden border border-primary/45 box-border bg-white"
-                style={{ aspectRatio: SLIDE_ASPECT_RATIO }}
+              <TransformComponent
+                wrapperStyle={{ width: "100%", height: "100%" }}
+                contentStyle={{
+                  width: "100%",
+                  height: "100%",
+                  display: "flex",
+                  alignItems: "flex-start",
+                  justifyContent: "center",
+                }}
               >
-                {scene && (
-                  <Suspense
-                    fallback={
-                      <div className="flex h-full w-full items-center justify-center text-sm text-muted-foreground">
-                        Chargement de l'editeur...
+                <div
+                  className="relative w-full max-w-none"
+                  style={{
+                    width: "min(100%, calc((100vh - 260px) * 16 / 9))",
+                  }}
+                >
+                  <div
+                    className="w-full overflow-hidden box-border bg-white"
+                    style={{ aspectRatio: SLIDE_ASPECT_RATIO }}
+                  >
+                    {scene && (
+                      <Suspense
+                        fallback={
+                          <div className="flex h-full w-full items-center justify-center text-sm text-muted-foreground">
+                            Chargement de l'editeur...
+                          </div>
+                        }
+                      >
+                        <SlideEditorCanvas
+                          scene={scene}
+                          selectedIds={selectedElementIds}
+                          viewportZoom={workspaceZoom}
+                          onSelectionChange={setSelectedElementIds}
+                          onChangeElementStyle={(elementId, patch) =>
+                            updateElementStyle(
+                              safeCurrentSlide,
+                              elementId,
+                              patch,
+                            )
+                          }
+                          onUpdateTextContent={(elementId, newText) =>
+                            updateTextElementContent(
+                              safeCurrentSlide,
+                              elementId,
+                              newText,
+                            )
+                          }
+                          onChangeElementGeometry={(elementId, patch) =>
+                            updateElementGeometry(
+                              safeCurrentSlide,
+                              elementId,
+                              patch,
+                            )
+                          }
+                        />
+                      </Suspense>
+                    )}
+                  </div>
+
+                  <div
+                    className={cn(
+                      "absolute left-1/2 -translate-x-1/2 -top-14 z-20 hidden max-w-[calc(100%-12px)] items-center gap-1 rounded-xl border border-border/70 bg-background/95 backdrop-blur-md px-1.5 py-1.5 md:max-h-24 md:flex-wrap md:overflow-x-auto",
+                      selectedElement && "md:flex",
+                    )}
+                  >
+                    <div className="flex items-center gap-1 rounded-lg border border-border/70 bg-background px-1 py-0.5">
+                      <button
+                        onClick={() => toggleToolbarGroup("common")}
+                        className="rounded-md px-2 py-1 text-[11px] font-semibold text-foreground hover:bg-muted"
+                      >
+                        Opacite {collapsedGroups.common ? "+" : "-"}
+                      </button>
+                      {!collapsedGroups.common && selectedElement && (
+                        <>
+                          <button
+                            onClick={() =>
+                              adjustSelectedStyle({
+                                opacity: Math.max(
+                                  0.05,
+                                  Number(
+                                    (selectedElement.opacity - 0.05).toFixed(2),
+                                  ),
+                                ),
+                              })
+                            }
+                            className="flex size-8 items-center justify-center rounded-md text-foreground hover:bg-muted"
+                          >
+                            <Minus className="size-4" />
+                          </button>
+                          <span className="min-w-9 text-center text-xs font-semibold text-foreground tabular-nums">
+                            {Math.round(selectedElement.opacity * 100)}%
+                          </span>
+                          <button
+                            onClick={() =>
+                              adjustSelectedStyle({
+                                opacity: Math.min(
+                                  1,
+                                  Number(
+                                    (selectedElement.opacity + 0.05).toFixed(2),
+                                  ),
+                                ),
+                              })
+                            }
+                            className="flex size-8 items-center justify-center rounded-md text-foreground hover:bg-muted"
+                          >
+                            <Plus className="size-4" />
+                          </button>
+                        </>
+                      )}
+                    </div>
+
+                    {selectedTextElement && (
+                      <div className="flex items-center gap-1 rounded-lg border border-border/70 bg-background px-1 py-0.5">
+                        <button
+                          onClick={() => toggleToolbarGroup("text")}
+                          className="rounded-md px-2 py-1 text-[11px] font-semibold text-foreground hover:bg-muted"
+                        >
+                          Texte {collapsedGroups.text ? "+" : "-"}
+                        </button>
+                        {!collapsedGroups.text && (
+                          <>
+                            <button
+                              onClick={() => adjustFontSize(-1)}
+                              className="flex size-8 items-center justify-center rounded-md text-foreground hover:bg-muted"
+                            >
+                              <Minus className="size-4" />
+                            </button>
+                            <span className="min-w-8 text-center text-xs font-semibold text-foreground tabular-nums">
+                              {Math.round(selectedTextElement.fontSize)}
+                            </span>
+                            <button
+                              onClick={() => adjustFontSize(1)}
+                              className="flex size-8 items-center justify-center rounded-md text-foreground hover:bg-muted"
+                            >
+                              <Plus className="size-4" />
+                            </button>
+
+                            {selectedTextElement.type === "text" && (
+                              <>
+                                <button
+                                  onClick={() =>
+                                    adjustSelectedStyle({
+                                      fontWeight:
+                                        selectedTextElement.fontWeight >= 600
+                                          ? 500
+                                          : 700,
+                                    })
+                                  }
+                                  className={cn(
+                                    "flex size-8 items-center justify-center rounded-md hover:bg-muted",
+                                    selectedTextElement.fontWeight >= 600
+                                      ? "bg-primary/10 text-primary"
+                                      : "text-foreground",
+                                  )}
+                                >
+                                  <Bold className="size-4" />
+                                </button>
+                                <button
+                                  onClick={() =>
+                                    adjustSelectedStyle({
+                                      fontStyle:
+                                        selectedTextElement.fontStyle ===
+                                        "italic"
+                                          ? "normal"
+                                          : "italic",
+                                    })
+                                  }
+                                  className={cn(
+                                    "flex size-8 items-center justify-center rounded-md hover:bg-muted",
+                                    selectedTextElement.fontStyle === "italic"
+                                      ? "bg-primary/10 text-primary"
+                                      : "text-foreground",
+                                  )}
+                                >
+                                  <Italic className="size-4" />
+                                </button>
+                              </>
+                            )}
+
+                            <label className="relative flex size-8 cursor-pointer items-center justify-center rounded-md border border-border/70 hover:bg-muted">
+                              <Palette className="size-4 text-foreground" />
+                              <input
+                                type="color"
+                                value={selectedTextElement.color}
+                                onChange={(event) =>
+                                  adjustSelectedStyle({
+                                    color: event.target.value,
+                                  })
+                                }
+                                className="absolute inset-0 opacity-0 cursor-pointer"
+                              />
+                            </label>
+
+                            <button
+                              onClick={() => adjustLineHeight(-0.05)}
+                              className="flex size-8 items-center justify-center rounded-md border border-border/70 text-foreground hover:bg-muted"
+                            >
+                              <ArrowUpDown className="size-4" />
+                            </button>
+                            <button
+                              onClick={() => adjustLineHeight(0.05)}
+                              className="flex size-8 items-center justify-center rounded-md border border-border/70 text-foreground hover:bg-muted"
+                            >
+                              <ArrowUpDown className="size-4 rotate-180" />
+                            </button>
+
+                            {selectedTextElement.type === "text" && (
+                              <>
+                                <button
+                                  onClick={() =>
+                                    adjustSelectedStyle({ align: "left" })
+                                  }
+                                  className="flex size-8 items-center justify-center rounded-md border border-border/70 text-foreground hover:bg-muted"
+                                >
+                                  <AlignLeft className="size-4" />
+                                </button>
+                                <button
+                                  onClick={() =>
+                                    adjustSelectedStyle({ align: "center" })
+                                  }
+                                  className="flex size-8 items-center justify-center rounded-md border border-border/70 text-foreground hover:bg-muted"
+                                >
+                                  <AlignCenter className="size-4" />
+                                </button>
+                                <button
+                                  onClick={() =>
+                                    adjustSelectedStyle({ align: "right" })
+                                  }
+                                  className="flex size-8 items-center justify-center rounded-md border border-border/70 text-foreground hover:bg-muted"
+                                >
+                                  <AlignRight className="size-4" />
+                                </button>
+                              </>
+                            )}
+                          </>
+                        )}
                       </div>
-                    }
-                  >
-                    <SlideEditorCanvas
-                      scene={scene}
-                      selectedIds={selectedElementIds}
-                      onSelectionChange={setSelectedElementIds}
-                      onUpdateTextContent={(elementId, newText) =>
-                        updateTextElementContent(
-                          safeCurrentSlide,
-                          elementId,
-                          newText,
-                        )
-                      }
-                      onChangeElementGeometry={(elementId, patch) =>
-                        updateElementGeometry(
-                          safeCurrentSlide,
-                          elementId,
-                          patch,
-                        )
-                      }
-                    />
-                  </Suspense>
-                )}
-              </div>
+                    )}
 
-              <div
-                className={cn(
-                  "absolute left-1/2 -translate-x-1/2 -top-14 z-20 hidden w-fit max-w-[calc(100%-8px)] items-center gap-2 rounded-xl border border-border/70 bg-background/95 backdrop-blur-md px-2.5 py-1.5",
-                  isEditingOnSlide && "md:flex",
-                )}
-              >
-                <div className="flex items-center gap-1 rounded-lg border border-border/70 bg-background px-1">
-                  <button
-                    onClick={() => adjustFontSize(-1)}
-                    disabled={!selectedTextElement}
-                    className="flex size-8 items-center justify-center rounded-md text-foreground hover:bg-muted disabled:opacity-35"
-                    aria-label="Reduire taille"
-                  >
-                    <Minus className="size-4" />
-                  </button>
-                  <span className="min-w-8 text-center text-xs font-semibold text-foreground">
-                    {selectedTextElement
-                      ? Math.round(selectedTextElement.fontSize)
-                      : "--"}
-                  </span>
-                  <button
-                    onClick={() => adjustFontSize(1)}
-                    disabled={!selectedTextElement}
-                    className="flex size-8 items-center justify-center rounded-md text-foreground hover:bg-muted disabled:opacity-35"
-                    aria-label="Augmenter taille"
-                  >
-                    <Plus className="size-4" />
-                  </button>
+                    {selectedShapeElement && (
+                      <div className="flex items-center gap-1 rounded-lg border border-border/70 bg-background px-1 py-0.5">
+                        <button
+                          onClick={() => toggleToolbarGroup("shape")}
+                          className="rounded-md px-2 py-1 text-[11px] font-semibold text-foreground hover:bg-muted"
+                        >
+                          Forme {collapsedGroups.shape ? "+" : "-"}
+                        </button>
+                        {!collapsedGroups.shape && (
+                          <>
+                            <button
+                              onClick={() =>
+                                adjustSelectedStyle({
+                                  shape: "rect",
+                                  cornerRadius: Math.max(
+                                    12,
+                                    selectedShapeElement.cornerRadius,
+                                  ),
+                                })
+                              }
+                              className={cn(
+                                "rounded-md px-2 py-1 text-[11px] font-semibold",
+                                selectedShapeElement.shape === "rect"
+                                  ? "bg-primary/10 text-primary"
+                                  : "text-foreground hover:bg-muted",
+                              )}
+                            >
+                              Rect
+                            </button>
+                            <button
+                              onClick={() =>
+                                adjustSelectedStyle({
+                                  shape: "ellipse",
+                                  cornerRadius: 0,
+                                })
+                              }
+                              className={cn(
+                                "rounded-md px-2 py-1 text-[11px] font-semibold",
+                                selectedShapeElement.shape === "ellipse"
+                                  ? "bg-primary/10 text-primary"
+                                  : "text-foreground hover:bg-muted",
+                              )}
+                            >
+                              Cercle
+                            </button>
+
+                            <input
+                              type="text"
+                              value={selectedShapeElement.label}
+                              onChange={(event) =>
+                                updateTextElementContent(
+                                  safeCurrentSlide,
+                                  selectedShapeElement.id,
+                                  event.target.value,
+                                )
+                              }
+                              placeholder="Texte de forme"
+                              className="h-8 w-34 rounded-md border border-border/70 bg-background px-2 text-xs outline-none focus-visible:border-ring"
+                            />
+
+                            <button
+                              onClick={() =>
+                                adjustSelectedStyle({ textAlign: "left" })
+                              }
+                              className="flex size-8 items-center justify-center rounded-md border border-border/70 text-foreground hover:bg-muted"
+                            >
+                              <AlignLeft className="size-4" />
+                            </button>
+                            <button
+                              onClick={() =>
+                                adjustSelectedStyle({ textAlign: "center" })
+                              }
+                              className="flex size-8 items-center justify-center rounded-md border border-border/70 text-foreground hover:bg-muted"
+                            >
+                              <AlignCenter className="size-4" />
+                            </button>
+                            <button
+                              onClick={() =>
+                                adjustSelectedStyle({ textAlign: "right" })
+                              }
+                              className="flex size-8 items-center justify-center rounded-md border border-border/70 text-foreground hover:bg-muted"
+                            >
+                              <AlignRight className="size-4" />
+                            </button>
+
+                            <label className="relative flex size-8 cursor-pointer items-center justify-center rounded-md border border-border/70 hover:bg-muted">
+                              <Palette className="size-4 text-foreground" />
+                              <input
+                                type="color"
+                                value={selectedShapeElement.fill}
+                                onChange={(event) =>
+                                  adjustSelectedStyle({
+                                    fill: event.target.value,
+                                  })
+                                }
+                                className="absolute inset-0 opacity-0 cursor-pointer"
+                              />
+                            </label>
+                          </>
+                        )}
+                      </div>
+                    )}
+                  </div>
                 </div>
-
-                <button
-                  onClick={() => {
-                    if (!selectedTextElement) return;
-                    adjustSelectedStyle({
-                      fontWeight:
-                        selectedTextElement.fontWeight >= 600 ? 500 : 700,
-                    });
-                  }}
-                  disabled={!selectedTextElement}
-                  className={cn(
-                    "flex size-8 items-center justify-center rounded-md border border-border/70 hover:bg-muted disabled:opacity-35",
-                    selectedTextElement && selectedTextElement.fontWeight >= 600
-                      ? "bg-primary/10 text-primary"
-                      : "text-foreground",
-                  )}
-                  aria-label="Poids"
-                >
-                  <Bold className="size-4" />
-                </button>
-
-                <button
-                  onClick={() => {
-                    if (!selectedTextElement) return;
-                    adjustSelectedStyle({
-                      fontStyle:
-                        selectedTextElement.type === "text" &&
-                        selectedTextElement.fontStyle === "italic"
-                          ? "normal"
-                          : "italic",
-                    });
-                  }}
-                  disabled={!selectedTextElement}
-                  className={cn(
-                    "flex size-8 items-center justify-center rounded-md border border-border/70 hover:bg-muted disabled:opacity-35",
-                    selectedTextElement &&
-                      selectedTextElement.type === "text" &&
-                      selectedTextElement.fontStyle === "italic"
-                      ? "bg-primary/10 text-primary"
-                      : "text-foreground",
-                  )}
-                  aria-label="Italique"
-                >
-                  <Italic className="size-4" />
-                </button>
-
-                <button
-                  disabled
-                  className="flex size-8 items-center justify-center rounded-md border border-border/70 text-muted-foreground opacity-45"
-                  aria-label="Underline"
-                >
-                  <Underline className="size-4" />
-                </button>
-
-                <button
-                  disabled
-                  className="flex size-8 items-center justify-center rounded-md border border-border/70 text-muted-foreground opacity-45"
-                  aria-label="Strikethrough"
-                >
-                  <Strikethrough className="size-4" />
-                </button>
-
-                <label
-                  className={cn(
-                    "relative flex size-8 cursor-pointer items-center justify-center rounded-md border border-border/70 hover:bg-muted",
-                    !selectedTextElement && "pointer-events-none opacity-35",
-                  )}
-                  aria-label="Couleur"
-                >
-                  <Palette className="size-4 text-foreground" />
-                  <input
-                    type="color"
-                    value={
-                      selectedTextElement
-                        ? selectedTextElement.color
-                        : "#000000"
-                    }
-                    onChange={(event) =>
-                      selectedTextElement &&
-                      adjustSelectedStyle({ color: event.target.value })
-                    }
-                    className="absolute inset-0 opacity-0 cursor-pointer"
-                  />
-                </label>
-
-                <button
-                  onClick={() => adjustLineHeight(-0.05)}
-                  disabled={!selectedTextElement}
-                  className="flex size-8 items-center justify-center rounded-md border border-border/70 text-foreground hover:bg-muted disabled:opacity-35"
-                  aria-label="Interligne moins"
-                >
-                  <ArrowUpDown className="size-4" />
-                </button>
-
-                <button
-                  onClick={() => adjustLineHeight(0.05)}
-                  disabled={!selectedTextElement}
-                  className="flex size-8 items-center justify-center rounded-md border border-border/70 text-foreground hover:bg-muted disabled:opacity-35"
-                  aria-label="Interligne plus"
-                >
-                  <ArrowUpDown className="size-4 rotate-180" />
-                </button>
-
-                <button
-                  onClick={() => adjustSelectedStyle({ align: "left" })}
-                  disabled={
-                    !selectedTextElement || selectedTextElement.type !== "text"
-                  }
-                  className="flex size-8 items-center justify-center rounded-md border border-border/70 text-foreground hover:bg-muted disabled:opacity-35"
-                  aria-label="Aligner gauche"
-                >
-                  <AlignLeft className="size-4" />
-                </button>
-                <button
-                  onClick={() => adjustSelectedStyle({ align: "center" })}
-                  disabled={
-                    !selectedTextElement || selectedTextElement.type !== "text"
-                  }
-                  className="flex size-8 items-center justify-center rounded-md border border-border/70 text-foreground hover:bg-muted disabled:opacity-35"
-                  aria-label="Aligner centre"
-                >
-                  <AlignCenter className="size-4" />
-                </button>
-                <button
-                  onClick={() => adjustSelectedStyle({ align: "right" })}
-                  disabled={
-                    !selectedTextElement || selectedTextElement.type !== "text"
-                  }
-                  className="flex size-8 items-center justify-center rounded-md border border-border/70 text-foreground hover:bg-muted disabled:opacity-35"
-                  aria-label="Aligner droite"
-                >
-                  <AlignRight className="size-4" />
-                </button>
-              </div>
-            </div>
+              </TransformComponent>
+              <ZoomControls zoom={workspaceZoom} />
+            </TransformWrapper>
           </div>
 
           <div className="shrink-0 px-4 md:px-5 pt-3 pb-5">

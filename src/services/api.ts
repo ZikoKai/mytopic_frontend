@@ -1,10 +1,12 @@
 import { apiClient } from "@/services/http";
+import { buildEditorSceneForSlide } from "@/services/sceneBuilders";
 
 const DEFAULT_PRESENTATION_THEME = "editorial-light";
 const DEFAULT_SCHEMA_VERSION = "2026-04";
-const DEFAULT_SCENE_VERSION = "1.0";
-const DEFAULT_SCENE_WIDTH = 1600;
-const DEFAULT_SCENE_HEIGHT = 900;
+export const DEFAULT_SCENE_VERSION = "1.0";
+export const DEFAULT_SCENE_WIDTH = 1600;
+export const DEFAULT_SCENE_HEIGHT = 900;
+export const FIXED_BG_ELEMENT_ID = "slide-fixed-background";
 
 export type SlideDensity = "compact" | "balanced" | "expanded";
 export type SlideType =
@@ -79,6 +81,11 @@ export interface ShapeSlideElement extends SlideElementBase {
   stroke: string;
   strokeWidth: number;
   cornerRadius: number;
+  label: string;
+  textColor: string;
+  fontSize: number;
+  fontWeight: number;
+  textAlign: "left" | "center" | "right";
 }
 
 export interface ListSlideElement extends SlideElementBase {
@@ -216,6 +223,16 @@ interface PersistedPresentationResponse {
   updated_at: string;
 }
 
+export interface FavoriteImageAsset {
+  id: string;
+  title: string;
+  prompt: string;
+  image_data_url: string;
+  mime_type: string;
+  created_at: string;
+  updated_at: string;
+}
+
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
 }
@@ -229,7 +246,7 @@ function normalizeId(value: unknown, fallback: string): string {
   return candidate || fallback;
 }
 
-function createTextElement(
+export function createTextElement(
   id: string,
   text: string,
   zIndex: number,
@@ -261,7 +278,7 @@ function createTextElement(
   };
 }
 
-function createShapeElement(
+export function createShapeElement(
   id: string,
   zIndex: number,
   partial?: Partial<ShapeSlideElement>,
@@ -280,13 +297,21 @@ function createShapeElement(
     opacity: clamp(partial?.opacity ?? 1, 0.05, 1),
     shape: partial?.shape === "ellipse" ? "ellipse" : "rect",
     fill: partial?.fill ?? "#ffffff",
-    stroke: partial?.stroke ?? "#64748b",
-    strokeWidth: clamp(partial?.strokeWidth ?? 2, 0, 24),
+    stroke: partial?.stroke ?? "#94a3b8",
+    strokeWidth: clamp(partial?.strokeWidth ?? 1.5, 0, 24),
     cornerRadius: clamp(partial?.cornerRadius ?? 8, 0, 400),
+    label: String(partial?.label ?? ""),
+    textColor: partial?.textColor ?? "#0f172a",
+    fontSize: clamp(toNumber(partial?.fontSize, 28), 8, 220),
+    fontWeight: clamp(toNumber(partial?.fontWeight, 600), 100, 900),
+    textAlign:
+      partial?.textAlign === "left" || partial?.textAlign === "right"
+        ? partial.textAlign
+        : "center",
   };
 }
 
-function createListElement(
+export function createListElement(
   id: string,
   zIndex: number,
   partial?: Partial<ListSlideElement>,
@@ -316,7 +341,7 @@ function createListElement(
   };
 }
 
-function createTableElement(
+export function createTableElement(
   id: string,
   zIndex: number,
   partial?: Partial<TableSlideElement>,
@@ -360,7 +385,7 @@ function createTableElement(
   };
 }
 
-function createMediaElement(
+export function createMediaElement(
   id: string,
   zIndex: number,
   partial?: Partial<MediaSlideElement>,
@@ -386,7 +411,7 @@ function createMediaElement(
   };
 }
 
-function createIconElement(
+export function createIconElement(
   id: string,
   zIndex: number,
   partial?: Partial<IconSlideElement>,
@@ -410,7 +435,7 @@ function createIconElement(
   };
 }
 
-function createChartElement(
+export function createChartElement(
   id: string,
   zIndex: number,
   partial?: Partial<ChartSlideElement>,
@@ -447,7 +472,7 @@ function createChartElement(
   };
 }
 
-function createColumnsElement(
+export function createColumnsElement(
   id: string,
   zIndex: number,
   partial?: Partial<ColumnsSlideElement>,
@@ -486,7 +511,7 @@ function createColumnsElement(
   };
 }
 
-function createGroupElement(
+export function createGroupElement(
   id: string,
   zIndex: number,
   partial?: Partial<GroupSlideElement>,
@@ -509,7 +534,7 @@ function createGroupElement(
   };
 }
 
-function createBackgroundElement(
+export function createBackgroundElement(
   id: string,
   zIndex: number,
   partial?: Partial<BackgroundSlideElement>,
@@ -526,7 +551,7 @@ function createBackgroundElement(
     locked: partial?.locked ?? true,
     visible: partial?.visible ?? true,
     opacity: clamp(partial?.opacity ?? 1, 0.05, 1),
-    fill: partial?.fill ?? "#f8fafc",
+    fill: partial?.fill ?? "#ffffff",
     accent: partial?.accent ?? "#e2e8f0",
     pattern:
       partial?.pattern === "dots" || partial?.pattern === "grid"
@@ -535,7 +560,85 @@ function createBackgroundElement(
   };
 }
 
-export function createEditorSceneFromSlide(
+function isFixedBackgroundShape(element: SlideElement): boolean {
+  return element.type === "shape" && element.id === FIXED_BG_ELEMENT_ID;
+}
+
+function createFixedBackgroundShape(
+  width: number,
+  height: number,
+  partial?: Partial<ShapeSlideElement>,
+): ShapeSlideElement {
+  return createShapeElement(FIXED_BG_ELEMENT_ID, 0, {
+    ...partial,
+    id: FIXED_BG_ELEMENT_ID,
+    x: 0,
+    y: 0,
+    width: Math.max(640, width),
+    height: Math.max(360, height),
+    locked: true,
+    fill: partial?.fill ?? "#ffffff",
+    stroke: "transparent",
+    strokeWidth: 0,
+    cornerRadius: 0,
+    label: partial?.label ?? "",
+    visible: partial?.visible ?? true,
+    opacity: clamp(partial?.opacity ?? 1, 0.05, 1),
+  });
+}
+
+function looksLikeBackgroundShape(
+  element: SlideElement,
+  sceneWidth: number,
+  sceneHeight: number,
+): element is ShapeSlideElement {
+  return (
+    element.type === "shape" &&
+    element.width >= sceneWidth * 0.95 &&
+    element.height >= sceneHeight * 0.95 &&
+    element.x <= 5 &&
+    element.y <= 5
+  );
+}
+
+export function ensureFixedBackgroundShape(scene: EditorScene): EditorScene {
+  const width = clamp(toNumber(scene.width, DEFAULT_SCENE_WIDTH), 640, 4000);
+  const height = clamp(toNumber(scene.height, DEFAULT_SCENE_HEIGHT), 360, 3000);
+
+  const explicitFixed = scene.elements.find(isFixedBackgroundShape);
+  const inferredBackground = explicitFixed
+    ? null
+    : scene.elements.find((element) =>
+        looksLikeBackgroundShape(element, width, height),
+      );
+
+  const seedBackground =
+    (explicitFixed as ShapeSlideElement | undefined) ??
+    (inferredBackground as ShapeSlideElement | undefined);
+
+  const base = createFixedBackgroundShape(width, height, seedBackground);
+
+  const elements = [
+    base,
+    ...scene.elements.filter(
+      (element) =>
+        element.id !== base.id &&
+        (!inferredBackground || element.id !== inferredBackground.id),
+    ),
+  ]
+    .sort((a, b) => a.zIndex - b.zIndex)
+    .map((item, index) => ({ ...item, zIndex: index }));
+
+  return {
+    ...scene,
+    width,
+    height,
+    background: "#ffffff",
+    elements,
+  };
+}
+
+function createDefaultEditorSceneFromSlide(
   slide: Pick<Slide, "title" | "purpose" | "main_content">,
   index: number,
 ): EditorScene {
@@ -588,13 +691,64 @@ export function createEditorSceneFromSlide(
     );
   });
 
-  return {
+  return ensureFixedBackgroundShape({
     version: DEFAULT_SCENE_VERSION,
     width: DEFAULT_SCENE_WIDTH,
     height: DEFAULT_SCENE_HEIGHT,
-    background: "#f8fafc",
+    background: "#ffffff",
     elements,
+  });
+}
+
+function toBuilderSlide(slide: Partial<Slide>, index: number): Slide {
+  const title = String(slide.title ?? "").trim() || `Slide ${index + 1}`;
+  const purpose = String(slide.purpose ?? "").trim();
+  const mainContent = Array.isArray(slide.main_content)
+    ? slide.main_content
+        .map((item) => String(item ?? "").trim())
+        .filter(Boolean)
+    : [];
+
+  return {
+    slide_number:
+      Number.isInteger(slide.slide_number) && (slide.slide_number ?? 0) > 0
+        ? (slide.slide_number as number)
+        : index + 1,
+    slide_type: (slide.slide_type as SlideType) ?? "content",
+    semantic_type:
+      String(slide.semantic_type ?? "").trim() || "content.paragraph",
+    layout_variant:
+      String(slide.layout_variant ?? "").trim() || "text-left-accent",
+    density: (slide.density as SlideDensity) ?? "balanced",
+    title,
+    purpose,
+    content_format: (slide.content_format as ContentFormat) ?? "paragraph",
+    main_content: mainContent.length > 0 ? mainContent : [purpose || "Content"],
+    speaker_notes: String(slide.speaker_notes ?? "").trim(),
+    suggested_visual:
+      slide.suggested_visual === null || slide.suggested_visual === undefined
+        ? null
+        : String(slide.suggested_visual).trim() || null,
+    transition_to_next: String(slide.transition_to_next ?? "").trim(),
+    editor_scene: {
+      version: DEFAULT_SCENE_VERSION,
+      width: DEFAULT_SCENE_WIDTH,
+      height: DEFAULT_SCENE_HEIGHT,
+      background: "#ffffff",
+      elements: [],
+    },
   };
+}
+
+export function createEditorSceneFromSlide(
+  slide: Slide,
+  index: number,
+): EditorScene {
+  try {
+    return ensureFixedBackgroundShape(buildEditorSceneForSlide(slide, index));
+  } catch {
+    return createDefaultEditorSceneFromSlide(slide, index);
+  }
 }
 
 function normalizeEditorScene(
@@ -603,16 +757,7 @@ function normalizeEditorScene(
   index: number,
 ): EditorScene {
   if (!raw || typeof raw !== "object") {
-    return createEditorSceneFromSlide(
-      {
-        title: String(slide.title ?? ""),
-        purpose: String(slide.purpose ?? ""),
-        main_content: Array.isArray(slide.main_content)
-          ? slide.main_content.map((item) => String(item ?? ""))
-          : [],
-      },
-      index,
-    );
+    return createEditorSceneFromSlide(toBuilderSlide(slide, index), index);
   }
 
   const candidate = raw as Partial<EditorScene>;
@@ -620,16 +765,7 @@ function normalizeEditorScene(
     ? candidate.elements
     : [];
   if (elementsRaw.length === 0) {
-    return createEditorSceneFromSlide(
-      {
-        title: String(slide.title ?? ""),
-        purpose: String(slide.purpose ?? ""),
-        main_content: Array.isArray(slide.main_content)
-          ? slide.main_content.map((item) => String(item ?? ""))
-          : [],
-      },
-      index,
-    );
+    return createEditorSceneFromSlide(toBuilderSlide(slide, index), index);
   }
 
   const normalizedElements = elementsRaw
@@ -655,6 +791,8 @@ function normalizeEditorScene(
             opacity: clamp(toNumber(shape.opacity, 1), 0.05, 1),
             strokeWidth: clamp(toNumber(shape.strokeWidth, 2), 0, 24),
             cornerRadius: clamp(toNumber(shape.cornerRadius, 8), 0, 400),
+            fontSize: clamp(toNumber(shape.fontSize, 28), 8, 220),
+            fontWeight: clamp(toNumber(shape.fontWeight, 600), 100, 900),
           },
         );
       }
@@ -843,25 +981,16 @@ function normalizeEditorScene(
     .map((item, elementIndex) => ({ ...item, zIndex: elementIndex }));
 
   if (normalizedElements.length === 0) {
-    return createEditorSceneFromSlide(
-      {
-        title: String(slide.title ?? ""),
-        purpose: String(slide.purpose ?? ""),
-        main_content: Array.isArray(slide.main_content)
-          ? slide.main_content.map((item) => String(item ?? ""))
-          : [],
-      },
-      index,
-    );
+    return createEditorSceneFromSlide(toBuilderSlide(slide, index), index);
   }
 
-  return {
+  return ensureFixedBackgroundShape({
     version: String(candidate.version ?? DEFAULT_SCENE_VERSION),
     width: clamp(toNumber(candidate.width, DEFAULT_SCENE_WIDTH), 640, 4000),
     height: clamp(toNumber(candidate.height, DEFAULT_SCENE_HEIGHT), 360, 3000),
-    background: String(candidate.background ?? "#f8fafc"),
+    background: String(candidate.background ?? "#ffffff"),
     elements: normalizedElements,
-  };
+  });
 }
 
 /**
@@ -957,6 +1086,20 @@ export async function generatePresentation(
   return normalizePresentation(res.data);
 }
 
+export async function generateImageFromPrompt(
+  prompt: string,
+  size: "1024x1024" | "1024x1536" | "1536x1024" = "1024x1024",
+): Promise<{ image_data_url: string; mime_type: string }> {
+  const res = await apiClient.post<{
+    image_data_url: string;
+    mime_type: string;
+  }>("/presentations/generate-image", {
+    prompt,
+    size,
+  });
+  return res.data;
+}
+
 export async function listSavedPresentations(): Promise<
   PersistedPresentationSummary[]
 > {
@@ -1010,4 +1153,28 @@ export async function updateSavedPresentation(
     id: res.data.id,
     presentation: normalizePresentation(res.data.content),
   };
+}
+
+export async function listFavoriteImageAssets(): Promise<FavoriteImageAsset[]> {
+  const res = await apiClient.get<FavoriteImageAsset[]>(
+    "/presentations/uploads",
+  );
+  return res.data;
+}
+
+export async function saveFavoriteImageAsset(payload: {
+  title?: string;
+  prompt?: string;
+  image_data_url: string;
+  mime_type?: string;
+}): Promise<FavoriteImageAsset> {
+  const res = await apiClient.post<FavoriteImageAsset>(
+    "/presentations/uploads",
+    payload,
+  );
+  return res.data;
+}
+
+export async function deleteFavoriteImageAsset(assetId: string): Promise<void> {
+  await apiClient.delete(`/presentations/uploads/${assetId}`);
 }
