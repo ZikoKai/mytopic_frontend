@@ -35,33 +35,144 @@ const COLOR_PROPS = [
   "outlineColor",
 ] as const;
 
-/** Bake every computed colour into inline styles (rgb only). */
+// Text layout properties that must be baked so the iframe renders identically
+// even without the page's stylesheets.
+const TEXT_PROPS = [
+  "fontFamily",
+  "fontSize",
+  "fontWeight",
+  "fontStyle",
+  "letterSpacing",
+  "wordSpacing",
+  "lineHeight",
+  "textAlign",
+  "textTransform",
+  "textDecoration",
+  "whiteSpace",
+  "wordBreak",
+] as const;
+
+// Cache shared across all slides in one export run.
+const _colorCache = new Map<string, string>();
+
+/**
+ * Convert any CSS color string to rgb/rgba using the Canvas 2D API.
+ * Canvas is the only browser primitive guaranteed to return sRGB values
+ * even when the input is oklch/lab/lch – so html2canvas never sees them.
+ */
+function resolveColorToRgb(raw: string): string {
+  if (!raw) return raw;
+  const lower = raw.toLowerCase().trim();
+  if (
+    lower === "none" ||
+    lower === "transparent" ||
+    lower === "currentcolor" ||
+    lower === "inherit" ||
+    lower === "initial"
+  )
+    return raw;
+  // Already plain rgb/rgba/hex – no conversion needed.
+  if (lower.startsWith("rgb(") || lower.startsWith("rgba(") || lower.startsWith("#"))
+    return raw;
+
+  const cached = _colorCache.get(raw);
+  if (cached !== undefined) return cached;
+
+  try {
+    const canvas = document.createElement("canvas");
+    canvas.width = canvas.height = 1;
+    const ctx = canvas.getContext("2d")!;
+    ctx.clearRect(0, 0, 1, 1);
+    ctx.fillStyle = raw;
+    ctx.fillRect(0, 0, 1, 1);
+    const [r, g, b, a] = ctx.getImageData(0, 0, 1, 1).data;
+    const resolved =
+      a < 255
+        ? `rgba(${r},${g},${b},${(a / 255).toFixed(3)})`
+        : `rgb(${r},${g},${b})`;
+    _colorCache.set(raw, resolved);
+    return resolved;
+  } catch {
+    _colorCache.set(raw, raw);
+    return raw;
+  }
+}
+
+/**
+ * Scan a CSS value string for oklch(...) tokens and replace each one
+ * with its canvas-resolved rgb() equivalent.  Used for gradients and shadows.
+ */
+function resolveOklchInString(value: string): string {
+  if (!value.includes("oklch")) return value;
+  return value.replace(/oklch\([^)]+\)/gi, (match) => resolveColorToRgb(match));
+}
+
+/**
+ * Bake all computed colours AND text layout properties into inline styles.
+ * The clone will then render identically inside the font-less iframe.
+ */
 function bakeComputedStyles(root: HTMLElement): void {
   const all = [root, ...root.querySelectorAll<HTMLElement>("*")];
   for (const el of all) {
     const cs = window.getComputedStyle(el);
 
+    // Colours → force sRGB via canvas
     for (const p of COLOR_PROPS) {
-      el.style[p] = cs[p];
+      const raw = cs[p];
+      if (raw) el.style[p] = resolveColorToRgb(raw);
     }
 
-    // background-image (gradients)
+    // background-image gradients may carry oklch tokens
     const bgi = cs.backgroundImage;
     if (bgi && bgi !== "none") {
-      el.style.backgroundImage = bgi;
+      el.style.backgroundImage = resolveOklchInString(bgi);
     }
 
-    // box-shadow
+    // box-shadow colour stops may carry oklch tokens
     const bs = cs.boxShadow;
     if (bs && bs !== "none") {
-      el.style.boxShadow = bs;
+      el.style.boxShadow = resolveOklchInString(bs);
+    }
+
+    // Text layout properties – baked as absolute computed values so the
+    // iframe renders spacing/sizing identically regardless of which font loads.
+    for (const p of TEXT_PROPS) {
+      const raw = cs[p];
+      if (raw) el.style[p as keyof CSSStyleDeclaration] = raw as never;
     }
   }
 }
 
 /**
- * Render an element via html2canvas inside a clean <iframe>
- * so html2canvas never encounters the page's oklch stylesheets.
+ * Collect every @font-face rule from the main document's stylesheets.
+ * These are injected verbatim into the iframe so the browser can load
+ * the same font files from the same origin.
+ */
+function collectFontFaceRules(): string {
+  const rules: string[] = [];
+  try {
+    for (const sheet of Array.from(document.styleSheets)) {
+      try {
+        for (const rule of Array.from(sheet.cssRules)) {
+          if (rule instanceof CSSFontFaceRule) {
+            rules.push(rule.cssText);
+          }
+        }
+      } catch {
+        // CORS-blocked stylesheet – skip
+      }
+    }
+  } catch {
+    // ignore
+  }
+  return rules.join("\n");
+}
+
+/**
+ * Render an element via html2canvas inside a clean <iframe>.
+ * The iframe has no Tailwind/oklch stylesheets but does have all @font-face
+ * declarations and the already-loaded FontFace objects transferred from the
+ * main document, so fonts render identically to the editor.
  */
 async function renderInIframe(
   source: HTMLElement,
@@ -69,7 +180,9 @@ async function renderInIframe(
   height: number,
   bgColor: string,
 ): Promise<HTMLCanvasElement> {
-  // 1. Create a hidden iframe with no stylesheets
+  const fontFaceCss = collectFontFaceRules();
+
+  // 1. Create a hidden iframe with only the font declarations – no Tailwind
   const iframe = document.createElement("iframe");
   iframe.style.cssText =
     "position:fixed;left:-30000px;top:0;border:none;opacity:0;pointer-events:none;";
@@ -80,11 +193,22 @@ async function renderInIframe(
   const iframeDoc = iframe.contentDocument!;
   iframeDoc.open();
   iframeDoc.write(
-    "<!DOCTYPE html><html><head><style>*{margin:0;padding:0;box-sizing:border-box;}</style></head><body></body></html>",
+    `<!DOCTYPE html><html><head><style>*{margin:0;padding:0;box-sizing:border-box;}${fontFaceCss}</style></head><body></body></html>`,
   );
   iframeDoc.close();
 
-  // 2. Clone the source into the iframe body (deep clone)
+  // 2. Transfer already-loaded FontFace objects so the iframe doesn't need
+  //    to re-download the font files (they are already in memory).
+  for (const fontFace of document.fonts) {
+    try {
+      iframeDoc.fonts.add(fontFace);
+    } catch {
+      // Some browsers reject cross-document font transfer – @font-face CSS is
+      // the fallback for those cases.
+    }
+  }
+
+  // 3. Clone the source into the iframe body
   const clone = source.cloneNode(true) as HTMLElement;
   clone.style.position = "relative";
   clone.style.left = "0";
@@ -93,7 +217,13 @@ async function renderInIframe(
   clone.style.height = `${height}px`;
   iframeDoc.body.appendChild(clone);
 
-  // 3. Wait for images inside the clone
+  // 4. Wait for fonts and images to be ready
+  try {
+    await iframeDoc.fonts.ready;
+  } catch {
+    // fonts API unavailable – continue
+  }
+
   const imgs = clone.querySelectorAll("img");
   if (imgs.length > 0) {
     await Promise.all(
@@ -107,11 +237,9 @@ async function renderInIframe(
       ),
     );
   }
-  await new Promise((r) => setTimeout(r, 100));
+  await new Promise((r) => setTimeout(r, 120));
 
-  // 4. Call html2canvas on the clone INSIDE the iframe
-  //    html2canvas uses element.ownerDocument → it reads the iframe's
-  //    empty stylesheet list, never seeing oklch.
+  // 5. Capture – html2canvas reads ownerDocument (the iframe), never sees oklch
   try {
     const canvas = await html2canvas(clone, {
       width,
@@ -218,6 +346,7 @@ export async function exportToPdf(
   presentation: Presentation,
   setSlide: (index: number) => void,
 ): Promise<void> {
+  _colorCache.clear();
   const slides = presentation.slides;
   if (!slides || slides.length === 0)
     throw new Error("Aucune slide a exporter.");
@@ -255,6 +384,7 @@ export async function exportToPptx(
   presentation: Presentation,
   setSlide: (index: number) => void,
 ): Promise<void> {
+  _colorCache.clear();
   const slides = presentation.slides;
   if (!slides || slides.length === 0)
     throw new Error("Aucune slide a exporter.");
